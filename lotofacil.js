@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+export default async function handler(request) {
   try {
     const response = await fetch(
       "https://servicebus2.caixa.gov.br/portaldeloterias/api/lotofacil",
@@ -12,8 +12,14 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    res.status(200).json(data);
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (e) {
-    res.status(500).json({ erro: true });
+    return new Response(
+      JSON.stringify({ erro: true, detalhe: e.toString() }),
+      { status: 500 }
+    );
   }
 }
