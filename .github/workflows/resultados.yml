@@ -1,0 +1,44 @@
+name: Atualizar resultados
+
+# Busca os resultados na Caixa e grava dados*.json.
+# Roda no GitHub (IP da Azure) porque a Caixa bloqueia o IP do Google Cloud.
+on:
+  schedule:
+    # horários em UTC. Brasília = UTC-3.
+    - cron: "0,30 0-3 * * *"    # 21:00–00:30 BRT → sorteios da noite (seg-sáb)
+    - cron: "0,30 14-18 * * 0"  # 11:00–15:00 BRT → domingo de manhã
+  workflow_dispatch: {}         # 🔘 botão pra rodar na mão (use agora pra testar)
+
+permissions:
+  contents: write               # deixa o Action commitar no próprio repo
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o repo
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependência
+        run: pip install requests
+
+      - name: Buscar resultados na Caixa
+        run: python fetch_resultados.py
+
+      - name: Commitar se mudou
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add dados*.json
+            git commit -m "Atualiza resultados (automatico)"
+            git push
+            echo "Commitado."
+          else
+            echo "Nada novo pra commitar."
+          fi
