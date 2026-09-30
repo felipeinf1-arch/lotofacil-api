@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # ============================================================================
-#  fetch_resultados.py  —  roda no GitHub Actions (IP da Azure, fora do
-#  bloqueio da Azion que barra o Google Cloud).
+#  fetch_resultados.py  —  roda no GitHub Actions.
 #
-#  O que faz: pra cada loteria, olha o maior concurso que já está no
-#  dados*.json, pergunta à Caixa qual é o último, e BAIXA tudo que faltar
-#  (preenche buracos), gravando no mesmo formato do app: {concurso, numeros}.
+#  A Caixa está atrás do WAF da Azion, que barra IP de datacenter (Google E
+#  Azure deram 403 com requests comum). Este script usa curl_cffi, que IMITA
+#  a impressão digital TLS do Chrome de verdade — muitos WAFs que barram o
+#  requests deixam o curl_cffi passar, mesmo vindo de datacenter.
 #
-#  NÃO commita nada sozinho — quem faz o commit é o workflow (resultados.yml),
-#  só quando algum arquivo muda.
-#
-#  Mesmo formato/URLs do main.py (Cloud Function), pra bater 100%.
+#  Pra cada loteria: olha o maior concurso no dados*.json, pergunta à Caixa
+#  qual é o último e baixa o que faltar, gravando {concurso, numeros}.
+#  Não commita — quem commita é o workflow (só quando muda algo).
 # ============================================================================
 import json
 import sys
 import time
-import requests
+
+# curl_cffi: cliente HTTP que impersona TLS de navegador real.
+from curl_cffi import requests as cffi
 
 # loteria -> (endpoint base da Caixa, arquivo no repo)
 LOTERIAS = {
@@ -24,37 +25,34 @@ LOTERIAS = {
     "mega":      ("https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena",  "dados_mega.json"),
 }
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Referer": "https://loterias.caixa.gov.br/",
-    "Origin": "https://loterias.caixa.gov.br",
-}
+# navegador imitado (TLS/JA3 do Chrome). Se um não existir na versão do
+# curl_cffi, tenta o próximo.
+IMPERSONATE = ["chrome124", "chrome120", "chrome110", "chrome"]
 
-# limite de segurança: no máximo N concursos por execução (evita baixar o
-# histórico inteiro por engano se um arquivo vier vazio).
-MAX_POR_RODADA = 30
+MAX_POR_RODADA = 30  # trava de segurança: baixa no máximo N por execução
 
 
 def _sessao():
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    try:
-        s.get("https://loterias.caixa.gov.br/", timeout=15)  # aquece cookies
-    except Exception as e:
-        print(f"  aquecimento falhou (segue): {e}")
-    return s
+    """Sessão curl_cffi imitando Chrome, aquecida com um GET no portal."""
+    ultimo_erro = None
+    for alvo in IMPERSONATE:
+        try:
+            s = cffi.Session(impersonate=alvo, timeout=25)
+            # aquecimento: pega cookies do WAF antes da API
+            s.get("https://loterias.caixa.gov.br/")
+            print(f"  (sessao curl_cffi impersonando '{alvo}')")
+            return s
+        except Exception as e:
+            ultimo_erro = e
+            continue
+    print(f"  nao criei sessao curl_cffi: {ultimo_erro}")
+    return None
 
 
 def _get_json(s, url, rotulo):
-    """GET com 3 tentativas. Retorna dict ou None (loga status real)."""
     for tent in range(1, 4):
         try:
-            r = s.get(url, timeout=25)
+            r = s.get(url)
             if r.status_code == 200:
                 try:
                     return r.json()
@@ -87,7 +85,6 @@ def _salvar(arquivo, lista):
 
 
 def _dezenas(data):
-    """Extrai as dezenas como lista de int, ordenada."""
     bruto = data.get("listaDezenas") or []
     return sorted(int(x) for x in bruto)
 
@@ -110,11 +107,9 @@ def atualizar(nome, url_base, arquivo, s):
         print("  ja esta em dia.")
         return False
 
-    # baixa do (maior_local+1) ate o ultimo — mas no maximo MAX_POR_RODADA
     inicio = maior_local + 1
     if maior_local == 0:
-        # arquivo vazio: nao baixa historico inteiro, so o ultimo
-        inicio = ultimo_num
+        inicio = ultimo_num  # arquivo vazio: baixa só o último, não o histórico
     fim = ultimo_num
     if fim - inicio + 1 > MAX_POR_RODADA:
         inicio = fim - MAX_POR_RODADA + 1
@@ -125,7 +120,7 @@ def atualizar(nome, url_base, arquivo, s):
         if numero in existentes:
             continue
         if numero == ultimo_num:
-            data = ultimo  # ja temos o ultimo em maos
+            data = ultimo
         else:
             data = _get_json(s, f"{url_base}/{numero}", f"{nome} {numero}")
         if not data or not data.get("listaDezenas"):
@@ -134,7 +129,7 @@ def atualizar(nome, url_base, arquivo, s):
         lista.append({"concurso": numero, "numeros": _dezenas(data)})
         existentes.add(numero)
         novos += 1
-        time.sleep(0.5)  # gentil com a Caixa
+        time.sleep(0.5)
 
     if novos:
         _salvar(arquivo, lista)
@@ -146,6 +141,9 @@ def atualizar(nome, url_base, arquivo, s):
 
 def main():
     s = _sessao()
+    if s is None:
+        print("RESULTADO: sem sessao")
+        sys.exit(0)
     mudou = False
     for nome, (url_base, arquivo) in LOTERIAS.items():
         try:
@@ -154,7 +152,6 @@ def main():
         except Exception as e:
             print(f"  ERRO inesperado em {nome}: {e}")
     print("RESULTADO:", "ATUALIZOU" if mudou else "sem novidades")
-    # exit 0 sempre (o workflow decide o commit pelo git status)
     sys.exit(0)
 
 
